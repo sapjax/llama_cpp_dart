@@ -23,8 +23,8 @@ import 'sampler_params.dart';
 /// generated tokens only and crash when prompt tokens reach them through
 /// `llama_sampler_accept` during prefill ('Unexpected empty grammar stack
 /// after accepting piece'). Attach the stage after prefill via
-/// [attachGrammar]; it appends to the end of the chain, matching
-/// llama-server where the grammar applies after the sampling filters.
+/// [attachGrammar], which splices the stage in just before the terminal
+/// sampler so its masking still constrains the pick.
 ///
 /// Pass [model] when the chain may use grammar / DRY / infill / logit-bias /
 /// mirostat-v1 — those samplers need the vocab or `n_ctx_train`. A
@@ -267,19 +267,33 @@ final class SamplerFactory {
     }
   }
 
-  /// Appends the grammar stage of [cfg] to an already-built [sampler]
-  /// chain. Call this AFTER prefill so prompt tokens never reach the
+  /// Inserts the grammar stage of [cfg] into an already-built [sampler]
+  /// chain, immediately BEFORE the terminal stage (dist / greedy /
+  /// mirostat). Call this AFTER prefill so prompt tokens never reach the
   /// grammar sampler; no-op when the grammar is disabled.
+  ///
+  /// The position matters: `llama_sampler_sample` applies every stage in
+  /// order and the terminal stage's apply sets `selected` — a grammar
+  /// appended after it can no longer influence the pick, so the
+  /// unconstrained choice would then fail accept() with 'Unexpected
+  /// empty grammar stack'.
   static void attachGrammar(
     Sampler sampler,
     GrammarConfig cfg,
     LlamaModel model,
   ) {
     if (!cfg.enabled) return;
-    LlamaLibrary.bindings.llama_sampler_chain_add(
-      sampler.pointer,
-      _createGrammar(cfg, model.vocab.pointer),
-    );
+    final b = LlamaLibrary.bindings;
+    final chain = sampler.pointer;
+    final grammar = _createGrammar(cfg, model.vocab.pointer);
+    final n = b.llama_sampler_chain_n(chain);
+    if (n == 0) {
+      b.llama_sampler_chain_add(chain, grammar);
+      return;
+    }
+    final terminal = b.llama_sampler_chain_remove(chain, n - 1);
+    b.llama_sampler_chain_add(chain, grammar);
+    b.llama_sampler_chain_add(chain, terminal);
   }
 
   static Pointer<llama_sampler> _createGrammar(
