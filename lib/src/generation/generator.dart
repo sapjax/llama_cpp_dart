@@ -56,6 +56,17 @@ final class Generator implements Finalizable {
     final sampler = SamplerFactory.build(request.sampler, model: context.model);
     try {
       var pos = await _prefill(request, sampler);
+      // Grammar constrains generated tokens only. Attaching it before
+      // prefill would feed prompt tokens into llama_grammar_accept_token,
+      // which aborts the process ('Unexpected empty grammar stack after
+      // accepting piece') whenever a prompt token — e.g. a chat-template
+      // marker like <|im_start|> — cannot match the grammar root. Upstream
+      // llama.cpp never prefills user-supplied grammars either.
+      SamplerFactory.attachGrammar(
+        sampler,
+        request.sampler.grammar,
+        context.model,
+      );
       var generated = 0;
 
       while (true) {

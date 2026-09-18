@@ -13,11 +13,18 @@ import 'sampler_params.dart';
 /// Default chain order, mirroring llama.cpp's recommended layout:
 ///
 ///   logit_bias → penalties → dry → top-n-sigma → top-k → typical-p →
-///   top-p → min-p → xtc → (dynamic-)temperature → grammar → infill →
+///   top-p → min-p → xtc → (dynamic-)temperature → infill →
 ///   mirostat | adaptive-p | dist
 ///
 /// Stages whose config is disabled are skipped. `greedy` short-circuits to
 /// argmax sampling and ignores everything else.
+///
+/// Grammar is NOT part of the built chain: grammar samplers constrain
+/// generated tokens only and crash when prompt tokens reach them through
+/// `llama_sampler_accept` during prefill ('Unexpected empty grammar stack
+/// after accepting piece'). Attach the stage after prefill via
+/// [attachGrammar]; it appends to the end of the chain, matching
+/// llama-server where the grammar applies after the sampling filters.
 ///
 /// Pass [model] when the chain may use grammar / DRY / infill / logit-bias /
 /// mirostat-v1 — those samplers need the vocab or `n_ctx_train`. A
@@ -160,9 +167,6 @@ final class SamplerFactory {
     if (params.mirostat.enabled) {
       // Mirostat is terminal — no temp / dist after it.
       _addMirostat(chain, params, model);
-      if (params.grammar.enabled) {
-        _addGrammar(chain, params.grammar, requireVocab('grammar'));
-      }
       if (params.infill) {
         b.llama_sampler_chain_add(
           chain,
@@ -174,9 +178,6 @@ final class SamplerFactory {
 
     if (params.temperature <= 0.0) {
       // Temp <= 0 — pick argmax after the filters.
-      if (params.grammar.enabled) {
-        _addGrammar(chain, params.grammar, requireVocab('grammar'));
-      }
       if (params.infill) {
         b.llama_sampler_chain_add(
           chain,
@@ -201,10 +202,6 @@ final class SamplerFactory {
         chain,
         b.llama_sampler_init_temp(params.temperature),
       );
-    }
-
-    if (params.grammar.enabled) {
-      _addGrammar(chain, params.grammar, requireVocab('grammar'));
     }
 
     if (params.infill) {
@@ -270,8 +267,22 @@ final class SamplerFactory {
     }
   }
 
-  static void _addGrammar(
-    Pointer<llama_sampler> chain,
+  /// Appends the grammar stage of [cfg] to an already-built [sampler]
+  /// chain. Call this AFTER prefill so prompt tokens never reach the
+  /// grammar sampler; no-op when the grammar is disabled.
+  static void attachGrammar(
+    Sampler sampler,
+    GrammarConfig cfg,
+    LlamaModel model,
+  ) {
+    if (!cfg.enabled) return;
+    LlamaLibrary.bindings.llama_sampler_chain_add(
+      sampler.pointer,
+      _createGrammar(cfg, model.vocab.pointer),
+    );
+  }
+
+  static Pointer<llama_sampler> _createGrammar(
     GrammarConfig cfg,
     Pointer<llama_vocab> vocab,
   ) {
@@ -280,15 +291,11 @@ final class SamplerFactory {
     final rootPtr = cfg.root.toNativeUtf8(allocator: calloc);
     try {
       if (!cfg.lazy) {
-        b.llama_sampler_chain_add(
-          chain,
-          b.llama_sampler_init_grammar(
-            vocab,
-            grammarPtr.cast(),
-            rootPtr.cast(),
-          ),
+        return b.llama_sampler_init_grammar(
+          vocab,
+          grammarPtr.cast(),
+          rootPtr.cast(),
         );
-        return;
       }
 
       final patterns = cfg.triggerPatterns;
@@ -309,17 +316,14 @@ final class SamplerFactory {
       }
 
       try {
-        b.llama_sampler_chain_add(
-          chain,
-          b.llama_sampler_init_grammar_lazy_patterns(
-            vocab,
-            grammarPtr.cast(),
-            rootPtr.cast(),
-            patternPtrs,
-            patterns.length,
-            tokenPtr,
-            tokens.length,
-          ),
+        return b.llama_sampler_init_grammar_lazy_patterns(
+          vocab,
+          grammarPtr.cast(),
+          rootPtr.cast(),
+          patternPtrs,
+          patterns.length,
+          tokenPtr,
+          tokens.length,
         );
       } finally {
         for (final p in allocated) {

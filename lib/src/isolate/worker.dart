@@ -632,6 +632,9 @@ Future<void> _streamSampleAfterPrefill({
   final accumulator = Utf8Accumulator();
   final batch = LlamaBatch(ctx.nBatch);
   final samplerHandle = SamplerFactory.build(sampler, model: state.model);
+  // Prefill already happened externally, so the grammar (if any) can join
+  // the chain right away — see SamplerFactory.attachGrammar.
+  SamplerFactory.attachGrammar(samplerHandle, sampler.grammar, state.model);
 
   var pos = initialPos;
   var generated = 0;
