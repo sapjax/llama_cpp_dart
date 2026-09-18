@@ -289,11 +289,15 @@ final class SamplerFactory {
     final n = b.llama_sampler_chain_n(chain);
     if (n == 0) {
       b.llama_sampler_chain_add(chain, grammar);
+      // ignore: avoid_print
+      print('[llama_cpp_dart] grammar attached (append, chain=$n)');
       return;
     }
     final terminal = b.llama_sampler_chain_remove(chain, n - 1);
     b.llama_sampler_chain_add(chain, grammar);
     b.llama_sampler_chain_add(chain, terminal);
+    // ignore: avoid_print
+    print('[llama_cpp_dart] grammar spliced before terminal (chain=$n)');
   }
 
   static Pointer<llama_sampler> _createGrammar(

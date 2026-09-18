@@ -70,8 +70,12 @@ final class Generator implements Finalizable {
       var generated = 0;
 
       while (true) {
+        // llama_sampler_sample already accepts the selected token into the
+        // chain (see its impl: apply -> read cur_p.selected -> accept).
+        // Accepting again here double-feeds stateful samplers — with a
+        // grammar stage the re-accept of the same token aborts the process
+        // ('Unexpected empty grammar stack after accepting piece').
         final token = sampler.sample(context);
-        sampler.accept(token);
 
         final bytes = tokenizer.encodeToken(token);
         final isEog = vocab.isEog(token);
