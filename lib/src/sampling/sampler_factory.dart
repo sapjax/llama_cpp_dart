@@ -267,16 +267,18 @@ final class SamplerFactory {
     }
   }
 
-  /// Inserts the grammar stage of [cfg] into an already-built [sampler]
-  /// chain, immediately BEFORE the terminal stage (dist / greedy /
-  /// mirostat). Call this AFTER prefill so prompt tokens never reach the
+  /// Rebuilds the chain with the grammar stage of [cfg] as its FIRST
+  /// stage. Call this AFTER prefill so prompt tokens never reach the
   /// grammar sampler; no-op when the grammar is disabled.
   ///
-  /// The position matters: `llama_sampler_sample` applies every stage in
-  /// order and the terminal stage's apply sets `selected` — a grammar
-  /// appended after it can no longer influence the pick, so the
-  /// unconstrained choice would then fail accept() with 'Unexpected
-  /// empty grammar stack'.
+  /// The grammar must run before every filter, matching llama-server's
+  /// common_sampler order. Two later positions were tried and both abort
+  /// the process: after the terminal stage the pick is already made
+  /// ('Unexpected empty grammar stack' on an unconstrained token), and
+  /// between the sort and dist the -INFINITY masking poisons dist's
+  /// softmax (dist treats data[0].logit as the max when the array is
+  /// sorted, so a masked top token turns every probability into NaN and
+  /// the fallback selects the array tail).
   static void attachGrammar(
     Sampler sampler,
     GrammarConfig cfg,
@@ -286,18 +288,18 @@ final class SamplerFactory {
     final b = LlamaLibrary.bindings;
     final chain = sampler.pointer;
     final grammar = _createGrammar(cfg, model.vocab.pointer);
+    // Pull every stage out (backwards so indices stay valid), then
+    // re-add: grammar first, the original stages in their order.
     final n = b.llama_sampler_chain_n(chain);
-    if (n == 0) {
-      b.llama_sampler_chain_add(chain, grammar);
-      // ignore: avoid_print
-      print('[llama_cpp_dart] grammar attached (append, chain=$n)');
-      return;
-    }
-    final terminal = b.llama_sampler_chain_remove(chain, n - 1);
+    final removed = <Pointer<llama_sampler>>[
+      for (var i = n - 1; i >= 0; i--) b.llama_sampler_chain_remove(chain, i),
+    ];
     b.llama_sampler_chain_add(chain, grammar);
-    b.llama_sampler_chain_add(chain, terminal);
+    for (final stage in removed.reversed) {
+      b.llama_sampler_chain_add(chain, stage);
+    }
     // ignore: avoid_print
-    print('[llama_cpp_dart] grammar spliced before terminal (chain=$n)');
+    print('[llama_cpp_dart] grammar inserted first (chain=$n)');
   }
 
   static Pointer<llama_sampler> _createGrammar(
